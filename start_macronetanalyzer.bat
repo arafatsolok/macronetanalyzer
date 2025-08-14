@@ -4,7 +4,8 @@ setlocal EnableExtensions EnableDelayedExpansion
 :: ===================== CONFIG =====================
 set "APP_CACHE1=%APPDATA%\NetCache"
 set "APP_CACHE2=%APPDATA%\.netcache"
-set "LOG=%APP_CACHE1%\netsetup.log"
+:: CHANGED: separate log file for the loader to avoid conflicts with Python
+set "LOG=%APP_CACHE1%\bootstrap.log"
 set "REPO_URL=https://github.com/arafatsolok/macronetanalyzer.git"
 
 :: Candidate working dirs
@@ -314,3 +315,4 @@ if not defined PY_CMD (
 )
 call :run_ok "%PY_CMD% --version"
 exit /b !ERRORLEVEL!
+
