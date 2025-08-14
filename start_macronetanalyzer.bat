@@ -7,22 +7,25 @@ set "APP_CACHE2=%APPDATA%\.netcache"
 set "LOG=%APP_CACHE1%\netsetup.log"
 set "REPO_URL=https://github.com/arafatsolok/macronetanalyzer.git"
 
+:: Candidate working dirs
 set "CANDIDATE1=C:\macronetanalyzer"
 set "CANDIDATE2=%USERPROFILE%\macronetanalyzer"
 set "CANDIDATE3=%LOCALAPPDATA%\macronetanalyzer"
 set "CANDIDATE4=%TEMP%\macronetanalyzer"
 
+:: Git direct installer fallback
 set "GIT_FILE_VER=2.45.2"
 set "GIT_TAG_VER=2.45.2.windows.1"
 set "GIT_URL=https://github.com/git-for-windows/git/releases/download/v%GIT_TAG_VER%/Git-%GIT_FILE_VER%-64-bit.exe"
 
+:: Python installer
 set "PY_FULL_VER=3.12.6"
 set "PY_INSTALLER_URL=https://www.python.org/ftp/python/%PY_FULL_VER%/python-%PY_FULL_VER%-amd64.exe"
 set "PY_PERUSER_DIR=%LocalAppData%\Programs\Python\Python312"
 set "PY_PERUSER_EXE=%PY_PERUSER_DIR%\python.exe"
 :: ==================================================
 
-:: --- Logging dirs (create both) ---
+:: --- Logging dirs (create both to satisfy any script version) ---
 if not exist "%APP_CACHE1%" md "%APP_CACHE1%" 2>nul
 if not exist "%APP_CACHE2%" md "%APP_CACHE2%" 2>nul
 attrib +h "%APP_CACHE1%" 2>nul
@@ -30,7 +33,7 @@ attrib +h "%APP_CACHE2%" 2>nul
 
 call :log "Starting setup launcher..."
 
-:: --- Pick workdir ---
+:: --- Work dir selection (labels to avoid parser quirks) ---
 set "WORKDIR="
 for %%D in ("%CANDIDATE1%" "%CANDIDATE2%" "%CANDIDATE3%" "%CANDIDATE4%") do (
   call :try_dir "%%~D"
@@ -50,7 +53,7 @@ if errorlevel 1 (
   echo Git installation failed. See log: "%LOG%"
   exit /b 2
 )
-git --version 1>>"%LOG%" 2>&1
+call :run_ok "git --version"
 
 :: --- Ensure Python & set PY_CMD ---
 call :ensure_python_and_set_cmd
@@ -63,44 +66,42 @@ call :log "Using PY_CMD=%PY_CMD%"
 
 :: --- Clone or update (no parentheses; absolute paths only) ---
 if exist "%WORKDIR%\.git\" goto UPDATE_REPO
+goto CLONE_REPO
 
 :CLONE_REPO
 call :log "Cloning fresh from %REPO_URL% into %WORKDIR% ..."
-rem If the dir exists and is not a repo, clear it safely
-if exist "%WORKDIR%\.git\" goto AFTER_REPO
-if exist "%WORKDIR%\NUL" (
-  dir /b "%WORKDIR%" >nul 2>&1 && rmdir /s /q "%WORKDIR%" 2>nul
-)
+rem If the dir exists and is not a repo, clear it
+dir /b "%WORKDIR%" >nul 2>&1
+if not errorlevel 1 rmdir /s /q "%WORKDIR%" 2>nul
 md "%WORKDIR%" 2>nul
 
-rem --- Use PowerShell to run git clone to avoid cmd.exe parsing issues ---
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-  "git clone --progress --config core.longpaths=true '%REPO_URL%' '%WORKDIR%'" 1>>"%LOG%" 2>&1
-set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" (
-  call :log "ERROR: git clone failed with code %RC%."
-  echo git clone failed (%RC%). See log: "%LOG%"
+for %%P in ("%WORKDIR%") do set "PARENT=%%~dpP"
+if not exist "%PARENT%" md "%PARENT%" 2>nul
+
+call :run_ok "git clone "%REPO_URL%" "%WORKDIR%""
+if errorlevel 1 (
+  call :log "ERROR: git clone failed."
+  echo git clone failed. See log: "%LOG%"
   exit /b 4
 )
 goto AFTER_REPO
 
-
 :UPDATE_REPO
 call :log "Repo detected. Fetching latest and resetting..."
 pushd "%WORKDIR%"
-git remote -v 1>>"%LOG%" 2>&1
-git fetch --all --prune 1>>"%LOG%" 2>&1
+call :run_ok "git remote -v"
+call :run_ok "git fetch --all --prune"
 git rev-parse --verify origin/main 1>>"%LOG%" 2>&1
 if not errorlevel 1 (
-  git reset --hard origin/main 1>>"%LOG%" 2>&1
+  call :run_ok "git reset --hard origin/main"
 ) else (
   call :log "WARN: 'origin/main' not found; trying 'origin/master'."
-  git reset --hard origin/master 1>>"%LOG%" 2>&1
+  call :run_ok "git reset --hard origin/master"
 )
 popd
 
 :AFTER_REPO
-:: --- Ensure Python-side log dirs (cover old/new script expectations) ---
+:: --- Ensure Python-side log dir(s) exist for old/new scripts ---
 if not exist "%APP_CACHE1%" md "%APP_CACHE1%" 2>nul
 if not exist "%APP_CACHE2%" md "%APP_CACHE2%" 2>nul
 attrib +h "%APP_CACHE1%" 2>nul
@@ -114,8 +115,8 @@ if not exist "%PY_SETUP%" (
   exit /b 5
 )
 pushd "%WORKDIR%"
-"%PY_CMD%" --version 1>>"%LOG%" 2>&1
-"%PY_CMD%" "%PY_SETUP%" 1>>"%LOG%" 2>&1
+call :run_ok "%PY_CMD% --version"
+call :run_ok "%PY_CMD% "%PY_SETUP%""
 set "RC=!ERRORLEVEL!"
 popd
 
@@ -140,6 +141,14 @@ set "TS=%date% %time%"
 echo %~1
 >>"%LOG%" echo %TS% - %~1
 goto :eof
+
+:run_ok
+set "CMDLINE=%~1"
+call :log "EXEC: %CMDLINE%"
+cmd /c %CMDLINE% 1>>"%LOG%" 2>&1
+set "RC=!ERRORLEVEL!"
+if not "!RC!"=="0" call :log "RC=!RC! for: %CMDLINE%"
+exit /b !RC!
 
 :try_dir
 set "TRY=%~1"
@@ -303,6 +312,5 @@ if not defined PY_CMD (
   call :log "ERROR: Could not resolve python.exe path."
   exit /b 1
 )
-"%PY_CMD%" --version 1>>"%LOG%" 2>&1
+call :run_ok "%PY_CMD% --version"
 exit /b !ERRORLEVEL!
-
