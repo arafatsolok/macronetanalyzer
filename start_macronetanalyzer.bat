@@ -66,22 +66,24 @@ if exist "%WORKDIR%\.git\" goto UPDATE_REPO
 
 :CLONE_REPO
 call :log "Cloning fresh from %REPO_URL% into %WORKDIR% ..."
-rem If the dir exists and is not a repo, clear it
-dir /b "%WORKDIR%" >nul 2>&1
-if not errorlevel 1 rmdir /s /q "%WORKDIR%" 2>nul
+rem If the dir exists and is not a repo, clear it safely
+if exist "%WORKDIR%\.git\" goto AFTER_REPO
+if exist "%WORKDIR%\NUL" (
+  dir /b "%WORKDIR%" >nul 2>&1 && rmdir /s /q "%WORKDIR%" 2>nul
+)
 md "%WORKDIR%" 2>nul
 
-for %%P in ("%WORKDIR%") do set "PARENT=%%~dpP"
-if not exist "%PARENT%" md "%PARENT%" 2>nul
-
-git clone "%REPO_URL%" "%WORKDIR%" 1>>"%LOG%" 2>&1
-set "RC=!ERRORLEVEL!"
-if not "!RC!"=="0" (
-  call :log "ERROR: git clone failed with code !RC!."
-  echo git clone failed (!RC!). See log: "%LOG%"
+rem --- Use PowerShell to run git clone to avoid cmd.exe parsing issues ---
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+  "git clone --progress --config core.longpaths=true '%REPO_URL%' '%WORKDIR%'" 1>>"%LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  call :log "ERROR: git clone failed with code %RC%."
+  echo git clone failed (%RC%). See log: "%LOG%"
   exit /b 4
 )
 goto AFTER_REPO
+
 
 :UPDATE_REPO
 call :log "Repo detected. Fetching latest and resetting..."
@@ -303,3 +305,4 @@ if not defined PY_CMD (
 )
 "%PY_CMD%" --version 1>>"%LOG%" 2>&1
 exit /b !ERRORLEVEL!
+
