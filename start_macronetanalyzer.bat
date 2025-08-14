@@ -1,152 +1,305 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-:: --------- CONFIG ---------
-set "PY_VER_MAJOR=3"
+:: ===================== CONFIG =====================
+set "APP_CACHE1=%APPDATA%\NetCache"
+set "APP_CACHE2=%APPDATA%\.netcache"
+set "LOG=%APP_CACHE1%\netsetup.log"
+set "REPO_URL=https://github.com/arafatsolok/macronetanalyzer.git"
+
+set "CANDIDATE1=C:\macronetanalyzer"
+set "CANDIDATE2=%USERPROFILE%\macronetanalyzer"
+set "CANDIDATE3=%LOCALAPPDATA%\macronetanalyzer"
+set "CANDIDATE4=%TEMP%\macronetanalyzer"
+
+set "GIT_FILE_VER=2.45.2"
+set "GIT_TAG_VER=2.45.2.windows.1"
+set "GIT_URL=https://github.com/git-for-windows/git/releases/download/v%GIT_TAG_VER%/Git-%GIT_FILE_VER%-64-bit.exe"
+
 set "PY_FULL_VER=3.12.6"
-set "PY_INSTALLER_URL=https://www.python.org/ftp/python/3.12.6/python-3.12.6-amd64.exe"
-set "APP_CACHE=%APPDATA%\NetCache"
-set "LOG=%APP_CACHE%\netsetup.log"
-set "THISDIR=%~dp0"
-set "PY_SETUP=%THISDIR%setup_macronetanalyzer.py"
-:: --------------------------
+set "PY_INSTALLER_URL=https://www.python.org/ftp/python/%PY_FULL_VER%/python-%PY_FULL_VER%-amd64.exe"
+set "PY_PERUSER_DIR=%LocalAppData%\Programs\Python\Python312"
+set "PY_PERUSER_EXE=%PY_PERUSER_DIR%\python.exe"
+:: ==================================================
 
-:: Ensure cache dir exists (hidden)
-if not exist "%APP_CACHE%" (
-  md "%APP_CACHE%" 2>nul
-  attrib +h "%APP_CACHE%" 2>nul
+:: --- Logging dirs (create both) ---
+if not exist "%APP_CACHE1%" md "%APP_CACHE1%" 2>nul
+if not exist "%APP_CACHE2%" md "%APP_CACHE2%" 2>nul
+attrib +h "%APP_CACHE1%" 2>nul
+attrib +h "%APP_CACHE2%" 2>nul
+
+call :log "Starting setup launcher..."
+
+:: --- Pick workdir ---
+set "WORKDIR="
+for %%D in ("%CANDIDATE1%" "%CANDIDATE2%" "%CANDIDATE3%" "%CANDIDATE4%") do (
+  call :try_dir "%%~D"
+  if defined WORKDIR goto HAVE_WORKDIR
 )
+call :log "ERROR: Could not create any working directory."
+echo Failed to create working directory. See log: "%LOG%"
+exit /b 1
 
-:: ---- Logging helper ----
-set "TS=%date% %time%"
-call :log "Starting setup process..."
-echo.
+:HAVE_WORKDIR
+call :log "Using work directory: %WORKDIR%"
 
-:: Prefer the Python launcher if present
-where py >nul 2>nul
-if %ERRORLEVEL%==0 (
-  call :log "Found 'py' launcher."
-  py -%PY_VER_MAJOR% -V >nul 2>nul
-  if %ERRORLEVEL%==0 (
-    for /f "usebackq tokens=1,2*" %%A in (`py -%PY_VER_MAJOR% -V 2^>^&1`) do set "PY_FOUND=%%A %%B"
-    call :log "Python detected via launcher: !PY_FOUND!"
-    set "PY_CMD=py -%PY_VER_MAJOR%"
-    goto :check_deps
-  )
+:: --- Ensure Git ---
+call :ensure_git
+if errorlevel 1 (
+  call :log "ERROR: Git not available after install attempts."
+  echo Git installation failed. See log: "%LOG%"
+  exit /b 2
 )
+git --version 1>>"%LOG%" 2>&1
 
-:: Fallback: python3
-where python3 >nul 2>nul
-if %ERRORLEVEL%==0 (
-  for /f "usebackq tokens=*" %%A in (`python3 --version 2^>^&1`) do set "PY_FOUND=%%A"
-  call :log "Python detected: !PY_FOUND!"
-  set "PY_CMD=python3"
-  goto :check_deps
+:: --- Ensure Python & set PY_CMD ---
+call :ensure_python_and_set_cmd
+if errorlevel 1 (
+  call :log "ERROR: Python not available after install attempts."
+  echo Python installation failed. See log: "%LOG%"
+  exit /b 3
 )
+call :log "Using PY_CMD=%PY_CMD%"
 
-:: Fallback: python
-where python >nul 2>nul
-if %ERRORLEVEL%==0 (
-  for /f "usebackq tokens=*" %%A in (`python --version 2^>^&1`) do set "PY_FOUND=%%A"
-  echo !PY_FOUND! | findstr /c:"Python %PY_VER_MAJOR%" >nul
-  if %ERRORLEVEL%==0 (
-    call :log "Python detected: !PY_FOUND!"
-    set "PY_CMD=python"
-    goto :check_deps
-  )
+:: --- Clone or update (no parentheses; absolute paths only) ---
+if exist "%WORKDIR%\.git\" goto UPDATE_REPO
+
+:CLONE_REPO
+call :log "Cloning fresh from %REPO_URL% into %WORKDIR% ..."
+rem If the dir exists and is not a repo, clear it
+dir /b "%WORKDIR%" >nul 2>&1
+if not errorlevel 1 rmdir /s /q "%WORKDIR%" 2>nul
+md "%WORKDIR%" 2>nul
+
+for %%P in ("%WORKDIR%") do set "PARENT=%%~dpP"
+if not exist "%PARENT%" md "%PARENT%" 2>nul
+
+git clone "%REPO_URL%" "%WORKDIR%" 1>>"%LOG%" 2>&1
+set "RC=!ERRORLEVEL!"
+if not "!RC!"=="0" (
+  call :log "ERROR: git clone failed with code !RC!."
+  echo git clone failed (!RC!). See log: "%LOG%"
+  exit /b 4
 )
+goto AFTER_REPO
 
-:: ---- Download & install Python ----
-call :log "Python not found; downloading %PY_FULL_VER% ..."
-set "INSTALLER=%TEMP%\py_install_%RANDOM%.exe"
-
-:: Prefer modern PowerShell downloader
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-  "Try { Invoke-WebRequest -Uri '%PY_INSTALLER_URL%' -OutFile '%INSTALLER%' -UseBasicParsing; exit 0 } Catch { exit 1 }"
-if not exist "%INSTALLER%" (
-  call :log "Download failed via Invoke-WebRequest. Trying WebClient..."
-  powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-    "(New-Object Net.WebClient).DownloadFile('%PY_INSTALLER_URL%', '%INSTALLER%')"
-)
-
-if not exist "%INSTALLER%" (
-  call :log "ERROR: Failed to download Python installer."
-  echo.
-  echo Failed to download Python. See log: "%LOG%"
-  exit /b 1
-)
-
-call :log "Installing Python silently..."
-:: Per-user install; add to PATH for future sessions
-"%INSTALLER%" /quiet InstallAllUsers=0 Include_launcher=1 PrependPath=1 SimpleInstall=1
-set "INSTALL_RC=%ERRORLEVEL%"
-del /q "%INSTALLER%" 2>nul
-
-if not "%INSTALL_RC%"=="0" (
-  call :log "ERROR: Python installer returned code %INSTALL_RC%."
-  echo.
-  echo Python installation failed (code %INSTALL_RC%). See log: "%LOG%"
-  exit /b 1
-)
-
-:: Attempt to locate the newly installed python for THIS session
-set "PY_CMD="
-:: Try launcher again
-where py >nul 2>nul && set "PY_CMD=py -%PY_VER_MAJOR%"
-if not defined PY_CMD (
-  :: Default per-user path pattern
-  for /f "usebackq tokens=* delims=" %%P in (`
-    powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
-      "$p=(Get-ChildItem -Path $env:LocalAppData\Programs\Python -Directory -ErrorAction SilentlyContinue ^| Sort-Object Name -Descending ^| Select-Object -First 1).FullName; if($p){Join-Path $p 'python.exe'}"
-  `) do set "PY_CAND=%%P"
-  if exist "!PY_CAND!" set "PY_CMD=!PY_CAND!"
-)
-
-if not defined PY_CMD (
-  call :log "WARNING: Could not resolve python.exe path for current session. Will try 'python'."
-  set "PY_CMD=python"
-)
-
-:: Quick sanity check
-"%PY_CMD%" --version >nul 2>nul
-if %ERRORLEVEL%==0 (
-  for /f "usebackq tokens=*" %%A in (`"%PY_CMD%" --version 2^>^&1`) do set "PY_FOUND=%%A"
-  call :log "Python installed and usable: !PY_FOUND!"
+:UPDATE_REPO
+call :log "Repo detected. Fetching latest and resetting..."
+pushd "%WORKDIR%"
+git remote -v 1>>"%LOG%" 2>&1
+git fetch --all --prune 1>>"%LOG%" 2>&1
+git rev-parse --verify origin/main 1>>"%LOG%" 2>&1
+if not errorlevel 1 (
+  git reset --hard origin/main 1>>"%LOG%" 2>&1
 ) else (
-  call :log "ERROR: Python not usable after install."
-  echo.
-  echo Python appears installed but not yet usable in this session.
-  echo Please open a NEW terminal and re-run this script.
-  exit /b 1
+  call :log "WARN: 'origin/main' not found; trying 'origin/master'."
+  git reset --hard origin/master 1>>"%LOG%" 2>&1
 )
+popd
 
-:check_deps
-call :log "Running setup_macronetanalyzer.py ..."
+:AFTER_REPO
+:: --- Ensure Python-side log dirs (cover old/new script expectations) ---
+if not exist "%APP_CACHE1%" md "%APP_CACHE1%" 2>nul
+if not exist "%APP_CACHE2%" md "%APP_CACHE2%" 2>nul
+attrib +h "%APP_CACHE1%" 2>nul
+attrib +h "%APP_CACHE2%" 2>nul
+
+:: --- Run setup_macronetanalyzer.py from repo root ---
+set "PY_SETUP=%WORKDIR%\setup_macronetanalyzer.py"
 if not exist "%PY_SETUP%" (
-  call :log "ERROR: Setup script not found at %PY_SETUP%."
+  call :log "ERROR: Setup script not found: %PY_SETUP%"
   echo Setup script not found: "%PY_SETUP%"
-  exit /b 1
+  exit /b 5
 )
+pushd "%WORKDIR%"
+"%PY_CMD%" --version 1>>"%LOG%" 2>&1
+"%PY_CMD%" "%PY_SETUP%" 1>>"%LOG%" 2>&1
+set "RC=!ERRORLEVEL!"
+popd
 
-"%PY_CMD%" "%PY_SETUP%"
-set "RC=%ERRORLEVEL%"
-
-if "%RC%"=="0" (
+if "!RC!"=="0" (
   call :log "Setup completed successfully."
   echo Setup completed successfully.
 ) else (
-  call :log "ERROR: Setup failed with code %RC%."
-  echo Setup failed with exit code %RC%. See log: "%LOG%"
-  exit /b %RC%
+  call :log "ERROR: Setup failed with code !RC!."
+  echo Setup failed with exit code !RC!. See log: "%LOG%"
+  exit /b !RC!
 )
 
 echo.
 pause
 exit /b 0
 
-:: --------- functions ----------
+
+:: ===================== FUNCTIONS =====================
+
 :log
 set "TS=%date% %time%"
 echo %~1
 >>"%LOG%" echo %TS% - %~1
 goto :eof
+
+:try_dir
+set "TRY=%~1"
+if not defined TRY exit /b 0
+if exist "%TRY%\." (
+  set "WORKDIR=%TRY%"
+  call :log "Directory exists: %TRY%"
+  exit /b 0
+)
+if exist "%TRY%" (
+  call :log "Path exists but is a file: %TRY%"
+  exit /b 0
+)
+md "%TRY%" 1>>"%LOG%" 2>&1
+if exist "%TRY%\." (
+  set "WORKDIR=%TRY%"
+  call :log "Created directory with md: %TRY%"
+  exit /b 0
+)
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+  "New-Item -Path '%TRY%' -ItemType Directory -Force | Out-Null" 1>>"%LOG%" 2>&1
+if exist "%TRY%\." (
+  set "WORKDIR=%TRY%"
+  call :log "Created directory with PowerShell: %TRY%"
+  exit /b 0
+)
+call :log "Failed to create: %TRY%"
+exit /b 0
+
+:ensure_git
+call :log "Checking for Git..."
+where git >nul 2>nul
+if not errorlevel 1 (
+  for /f "usebackq tokens=1,2*" %%A in (`git --version 2^>^&1`) do set "GIT_VER=%%A %%B"
+  call :log "Git present: !GIT_VER!"
+  exit /b 0
+)
+call :log "Git not found. Trying winget..."
+where winget >nul 2>nul
+if not errorlevel 1 (
+  winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements 1>>"%LOG%" 2>&1
+  if not errorlevel 1 (
+    call :log "Git installed via winget."
+    call :ensure_git_path
+    where git >nul 2>nul && exit /b 0
+  ) else (
+    call :log "winget install failed; will try alternatives."
+  )
+)
+call :log "Trying Chocolatey (if present)..."
+where choco >nul 2>nul
+if not errorlevel 1 (
+  choco install git -y --no-progress 1>>"%LOG%" 2>&1
+  if not errorlevel 1 (
+    call :log "Git installed via Chocolatey."
+    call :ensure_git_path
+    where git >nul 2>nul && exit /b 0
+  ) else (
+    call :log "Chocolatey install failed; will try direct download."
+  )
+)
+call :log "Downloading Git installer from %GIT_URL% ..."
+set "GIT_EXE=%TEMP%\git-install-%RANDOM%.exe"
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+  "Try{Invoke-WebRequest -Uri '%GIT_URL%' -OutFile '%GIT_EXE%' -UseBasicParsing; exit 0}Catch{exit 1}"
+if not exist "%GIT_EXE%" (
+  call :log "ERROR: Failed to download Git installer."
+  exit /b 1
+)
+call :log "Running Git installer silently..."
+"%GIT_EXE%" /VERYSILENT /NORESTART 1>>"%LOG%" 2>&1
+set "IR=!ERRORLEVEL!"
+del /q "%GIT_EXE%" 2>nul
+if not "!IR!"=="0" (
+  call :log "ERROR: Git installer returned code !IR!."
+  exit /b 1
+)
+call :ensure_git_path
+where git >nul 2>nul
+if not errorlevel 1 (
+  call :log "Git available after install."
+  exit /b 0
+) else (
+  call :log "ERROR: Git still not on PATH after install."
+  exit /b 1
+)
+
+:ensure_git_path
+for %%D in ("%ProgramFiles%\Git\cmd" "%ProgramFiles(x86)%\Git\cmd" "%LocalAppData%\Programs\Git\cmd") do (
+  if exist "%%~D\git.exe" (
+    set "PATH=%%~D;%PATH%"
+    call :log "Session PATH updated with %%~D"
+    goto :eof
+  )
+)
+goto :eof
+
+:ensure_python_and_set_cmd
+call :log "Checking for Python..."
+where py >nul 2>nul
+if not errorlevel 1 (
+  py -3 -V >nul 2>&1
+  if not errorlevel 1 (
+    for /f "usebackq tokens=*" %%A in (`py -3 -V 2^>^&1`) do set "PY_VER=%%A"
+    set "PY_CMD=py -3"
+    call :log "Python present via launcher: !PY_VER!"
+    exit /b 0
+  )
+)
+where python3 >nul 2>nul
+if not errorlevel 1 (
+  for /f "usebackq tokens=*" %%A in (`python3 --version 2^>^&1`) do set "PV=%%A"
+  echo !PV! | findstr /c:"Python 3" >nul
+  if not errorlevel 1 (
+    set "PY_CMD=python3"
+    call :log "Python present: !PV!"
+    exit /b 0
+  )
+)
+where python >nul 2>nul
+if not errorlevel 1 (
+  for /f "usebackq tokens=*" %%A in (`python --version 2^>^&1`) do set "PV=%%A"
+  echo !PV! | findstr /c:"Python 3" >nul
+  if not errorlevel 1 (
+    set "PY_CMD=python"
+    call :log "Python present: !PV!"
+    exit /b 0
+  )
+)
+call :log "Python not found; downloading %PY_FULL_VER% ..."
+set "PY_EXE=%TEMP%\py-install-%RANDOM%.exe"
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+  "Try{Invoke-WebRequest -Uri '%PY_INSTALLER_URL%' -OutFile '%PY_EXE%' -UseBasicParsing; exit 0}Catch{exit 1}"
+if not exist "%PY_EXE%" (
+  call :log "ERROR: Failed to download Python installer."
+  exit /b 1
+)
+call :log "Installing Python silently..."
+"%PY_EXE%" /quiet InstallAllUsers=0 Include_launcher=1 PrependPath=1 SimpleInstall=1 1>>"%LOG%" 2>&1
+set "IR=!ERRORLEVEL!"
+del /q "%PY_EXE%" 2>nul
+if not "!IR!"=="0" (
+  call :log "ERROR: Python installer returned code !IR!."
+  exit /b 1
+)
+if exist "%PY_PERUSER_EXE%" (
+  set "PATH=%PY_PERUSER_DIR%;%PATH%"
+  call :log "Session PATH prepended: %PY_PERUSER_DIR%"
+  set "PY_CMD=%PY_PERUSER_EXE%"
+) else (
+  for /f "usebackq delims=" %%P in (`
+    powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+      "$d=Join-Path $env:LocalAppData 'Programs\Python'; if(Test-Path $d){ Get-ChildItem $d -Directory | Sort-Object Name -Descending | ForEach-Object { $e=Join-Path $_.FullName 'python.exe'; if(Test-Path $e){ Write-Output $e; break }}}"
+  `) do set "PY_CMD=%%~fP" & set "PY_PERUSER_DIR=%%~dpP"
+  if defined PY_CMD (
+    set "PATH=%PY_PERUSER_DIR%;%PATH%"
+    call :log "Session PATH prepended: %PY_PERUSER_DIR%"
+  )
+)
+if not defined PY_CMD (
+  call :log "ERROR: Could not resolve python.exe path."
+  exit /b 1
+)
+"%PY_CMD%" --version 1>>"%LOG%" 2>&1
+exit /b !ERRORLEVEL!
