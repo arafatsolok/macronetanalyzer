@@ -7,29 +7,24 @@ from logging import handlers
 from pathlib import Path
 
 # --------------------------- Robust logging ---------------------------
+# We log to console + best-effort rotating file.
+# On Windows, we prefer %APPDATA%\NetCache and also try %APPDATA%\.netcache.
+# If both fail, we fall back to %TEMP%\netsetup_py.log.
 
 def configure_logging():
-    """
-    Create a console logger + best-effort rotating file logger.
-    On Windows, prefer %APPDATA%\NetCache; also try %APPDATA%\.netcache.
-    Fall back to %TEMP% if needed. Use a distinct filename to avoid
-    collisions with any batch/bootstrapper logs.
-    """
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    # Always log to console too
+    # Always log to console
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(ch)
 
-    # Candidate file targets in order
     candidates = []
     if platform.system() == "Windows":
         base = os.environ.get("APPDATA", str(Path.home()))
         netcache = Path(base) / "NetCache"
         dot_netcache = Path(base) / ".netcache"
-        # Create both to satisfy older/newer paths
         for d in (netcache, dot_netcache):
             try:
                 d.mkdir(parents=True, exist_ok=True)
@@ -44,7 +39,6 @@ def configure_logging():
             pass
         candidates.append(d / "netsetup_py.log")
 
-    # Temp fallback last
     candidates.append(Path(os.environ.get("TEMP", "/tmp")) / "netsetup_py.log")
 
     for p in candidates:
@@ -83,19 +77,15 @@ def ensure_pip():
         _run([PY, "-m", "pip", "--version"], check=False)
     except Exception:
         pass
-    # ensurepip may be a no-op; that's fine
     try:
         _run([PY, "-m", "ensurepip", "--upgrade"], check=False)
     except Exception:
         logging.info("ensurepip not available; continuing.")
-    # Upgrade core build tooling (best effort)
     _run([PY, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], check=False)
 
 
 def _module_import_name(pkg: str) -> str:
-    """
-    Map pip package names to importable module names for presence checks.
-    """
+    """Map pip package names to importable module names for presence checks."""
     mapping = {
         "pillow": "PIL",
         "opencv-python": "cv2",
@@ -160,7 +150,6 @@ def install_dependencies():
 
     for pkg in required:
         ok = _ensure_pkg(pkg, required=True)
-        # If opencv gui build fails, try headless variant
         if not ok and pkg == "opencv-python":
             logging.info("Attempting fallback: opencv-python-headless")
             _ensure_pkg("opencv-python-headless", required=True)
